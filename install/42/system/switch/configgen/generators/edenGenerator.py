@@ -398,6 +398,14 @@ class EdenGenerator(Generator):
         mkdir_if_not_exists(Path("/userdata/system/.cache"))
         mkdir_if_not_exists(Path("/userdata/system/" + cachedir))
 
+        if emudir == 'eden':
+                    mkdir_if_not_exists(Path("/userdata/system/.cache/AppImage-Cache/" + emudir))
+                    mkdir_if_not_exists(Path("/userdata/system/configs/" + emudir + "/shader"))
+                    ensure_symlink(
+                        "/userdata/system/configs/" + emudir + "/shader",
+                        "/userdata/system/.cache/AppImage-Cache/" + emudir + "/shader"
+                    )
+
         #Create Save/Mods Folder
         mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/user"))
         mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/user/save"))
