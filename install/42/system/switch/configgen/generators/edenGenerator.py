@@ -718,7 +718,10 @@ class EdenGenerator(Generator):
             yuzuConfig.set("Renderer", "aspect_ratio\\default", "true")
 
         # Graphical backend
-        if system.isOptSet('yuzu_backend'):
+        if emulator == "citron-emu":
+            yuzuConfig.set("Renderer", "backend", "0")
+            yuzuConfig.set("Renderer", "backend\\default", "true")
+        elif system.isOptSet('yuzu_backend'):
             yuzuConfig.set("Renderer", "backend", system.config["yuzu_backend"])
             yuzuConfig.set("Renderer", "backend\\default", "false")
         else:
@@ -813,7 +816,7 @@ class EdenGenerator(Generator):
                 yuzuConfig.set("Renderer", "resolution_setup", system.config["resolution_scale"])
                 yuzuConfig.set("Renderer", "resolution_setup\\default", "false")
             else:
-                yuzuConfig.set("Renderer", "resolution_setup", "2")
+                yuzuConfig.set("Renderer", "resolution_setup", "3")
                 yuzuConfig.set("Renderer", "resolution_setup\\default", "true")
 
         # Scaling filter

@@ -160,13 +160,14 @@ install_emulator_eden_pgo() {
 
 
 install_emulator_citron() {
-	message "log" "$addon_log" "<<< [ INSTALL : CITRON ]>>>"
+	message "log" "$addon_log" "<<< [ INSTALL : CITRON Neo-2026.09.10]>>>"
 
 	# INSTALL/UNPACK EMULATOR
 	# EMULATOR INSTALL ARCHIVE/APP NOT FOUND LOCALLY THEN ATTEMPT TO DOWNLOAD
-	message "log" "$addon_log" "Installing Citron Emulator App"
+	message "log" "$addon_log" "Installing Citron Neo-2026.09.10 Emulator App "
 	# Get lastest version from database & set the version for download
-    citron_install_url="https://foclabroc.freeboxos.fr:55973/share/oZ4k4wPXDTu-fy3g/citron-emu(2026.03.12).AppImage"
+    #citron_install_url="https://foclabroc.freeboxos.fr:55973/share/oZ4k4wPXDTu-fy3g/citron-emu(2026.03.12).AppImage"
+    citron_install_url="https://foclabroc.freeboxos.fr:55973/share/4Hd7ueCAGnpabXA5/citron-emu(2026.09.10).AppImage"
 
 	# If missing from local storage then attempt to download latest version
 	download_missing_file "$citron_install_url" "$switch_install_emus_dir/$citron_install_file" "Citron"
