@@ -221,6 +221,17 @@ post_install_eden_pgo() {
 	message "log" "$addon_log" "N/A"
 }
 
+# POST INSTALL EDEN NIGHTLY
+post_install_eden_nightly() {
+	# POST INSTALL COMMON YUZU
+	post_install_yuzu_common
+
+	message "log" "$addon_log" "<<< [ POST INSTALL FOR EDEN ]>>>"
+
+	# REPLACE WITH CODE
+	message "log" "$addon_log" "N/A"
+}
+
 
 # POST INSTALL CITRON
 post_install_citron() {

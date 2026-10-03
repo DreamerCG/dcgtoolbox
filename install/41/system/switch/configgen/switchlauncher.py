@@ -11,7 +11,6 @@ import yaml
 import configgen
 from configgen.emulatorlauncher import launch
 
-
 # Chargemnet des LIB SDL3 pour switch
 paths_to_check = ["/usr/lib/libSDL3.so", "/usr/lib/libSDL3.so.0"]
 target_lib = "/userdata/system/switch/lib/libSDL3.so.0.2.26"
@@ -76,6 +75,7 @@ def _new_get_generator(emulator: str):
     yuzuemu['eden-emu'] = 1
     yuzuemu['citron-emu'] = 1
     yuzuemu['eden-pgo'] = 1
+    yuzuemu['eden-nighlty'] = 1
     
     rom_nameq = os.path.basename(rom)
     if rom_nameq == 'ryujinx_config.xci_config':

@@ -341,6 +341,16 @@ unpack_packages_eden_pgo() {
 }
 
 
+# UNPACK PACKAGES EDEN
+unpack_packages_eden_nightly() {
+	# UNPACK COMMON PACKAGES FOR YUZU & FORKS
+	unpack_packages_common_yuzu
+
+	# UNPACK EDEN ONLY PACKAGES
+	unpack_packages_eden_only
+}
+
+
 
 # UNPACK CITRON ONLY PACKAGES
 unpack_packages_citron_only() {

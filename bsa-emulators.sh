@@ -5,31 +5,187 @@
 [ -n "$SOURCED_EMULATORS" ] && return
 SOURCED_EMULATORS=true
 
+# INSTALL RYUJINX
+install_emulator_ryujinx() {
+	message "log" "$addon_log" "<<< [ INSTALL RYUJINX ]>>>"
+
+	# INSTALL/UNPACK EMULATOR
+	message "log" "$addon_log" "Installing Ryujinx Emulator"
+
+	# Installation du wrapper pour Ryujinx
+	copy_make_executable "ryu_wrapper" \
+		"$switch_install_extra_dir" \
+		"$switch_system_dir/extra/ryu_wrapper"
+
+	# ---------------------------------------------------------
+	# Get latest version from Ryujinx
+	# Timeout after 10 seconds
+	# ---------------------------------------------------------
+
+	message "both" "$addon_log" "Checking latest Ryujinx Canary release..."
+
+	release="$(curl -fsL \
+		--connect-timeout 5 \
+		--max-time 10 \
+		https://git.ryujinx.app/Ryubing/Canary/releases \
+		| grep -m1 -oP '/releases/tag/\K[0-9]+\.[0-9]+\.[0-9]+')"
+
+	# ---------------------------------------------------------
+	# FALLBACK IF RELEASE CANNOT BE FOUND
+	# ---------------------------------------------------------
+
+	if [ -z "$release" ]; then
+
+		message "both" "$addon_log" "Unable to retrieve Ryujinx release"
+		message "both" "$addon_log" "Using backup Ryujinx Canary 1.3.351"
+
+		ryujinx_backup_url="https://foclabroc.freeboxos.fr:55973/share/zmkgBds8BiTLW3fG/ryujinx-canary-1.3.351.tar.gz"
+		ryujinx_backup_archive="/tmp/ryujinx-canary-1.3.351.tar.gz"
+
+		# Destination exacte du build Ryujinx extrait
+		ryujinx_backup_dir="/userdata/system/switch/appimages/ryujinx-extracted"
+
+		# Temporary extraction directory
+		ryujinx_backup_tmp="/userdata/system/switch/appimages/ryujinx-extracted-tmp"
+
+		# -----------------------------------------------------
+		# Cleanup old files
+		# -----------------------------------------------------
+
+		rm -rf "$ryujinx_backup_tmp"
+		rm -rf "$ryujinx_backup_dir"
+		rm -f "$ryujinx_backup_archive"
+
+		mkdir -p "$ryujinx_backup_tmp"
+
+		# -----------------------------------------------------
+		# Download backup
+		# -----------------------------------------------------
+
+		message "both" "$addon_log" "Downloading Ryujinx backup..."
+
+		if ! curl -fL \
+			--connect-timeout 10 \
+			--max-time 120 \
+			-o "$ryujinx_backup_archive" \
+			"$ryujinx_backup_url"; then
+
+			message "both" "$addon_log" "ERROR: Unable to download Ryujinx backup"
+
+			rm -rf "$ryujinx_backup_tmp"
+			rm -f "$ryujinx_backup_archive"
+
+			return 1
+		fi
+
+		message "both" "$addon_log" "Ryujinx backup downloaded"
+
+		# -----------------------------------------------------
+		# Extract backup
+		# -----------------------------------------------------
+
+		message "both" "$addon_log" "Extracting Ryujinx backup..."
+
+		if ! tar -xzf "$ryujinx_backup_archive" \
+			-C "$ryujinx_backup_tmp"; then
+
+			message "both" "$addon_log" "ERROR: Unable to extract Ryujinx backup"
+
+			rm -rf "$ryujinx_backup_tmp"
+			rm -f "$ryujinx_backup_archive"
+
+			return 1
+		fi
+
+		# -----------------------------------------------------
+		# Check expected structure
+		# -----------------------------------------------------
+
+		if [ ! -f "$ryujinx_backup_tmp/usr/bin/Ryujinx" ]; then
+
+			message "both" "$addon_log" "ERROR: Ryujinx executable not found"
+			message "both" "$addon_log" "Expected: usr/bin/Ryujinx"
+
+			rm -rf "$ryujinx_backup_tmp"
+			rm -f "$ryujinx_backup_archive"
+
+			return 1
+		fi
+
+		# -----------------------------------------------------
+		# Move extracted build to final location
+		# -----------------------------------------------------
+
+		mv "$ryujinx_backup_tmp" "$ryujinx_backup_dir"
+
+		chmod +x "$ryujinx_backup_dir/usr/bin/Ryujinx"
+
+		# Cleanup archive
+		rm -f "$ryujinx_backup_archive"
+
+		message "both" "$addon_log" "Ryujinx backup extracted successfully"
+		message "both" "$addon_log" "Ryujinx path : $ryujinx_backup_dir/usr/bin/Ryujinx"
+
+		return 0
+	fi
+
+	# ---------------------------------------------------------
+	# NORMAL CANARY APPIMAGE
+	# ---------------------------------------------------------
+
+	ryujinx_install_url="https://git.ryujinx.app/Ryubing/Canary/releases/download/${release}/ryujinx-canary-${release}-x64.AppImage"
+
+	message "both" "$addon_log" "Ryujinx Version : $release"
+	message "both" "$addon_log" "Ryujinx url : $ryujinx_install_url"
+
+	# Download latest version
+	download_missing_file \
+		"$ryujinx_install_url" \
+		"$switch_install_emus_dir/$ryujinx_install_file" \
+		"Ryujinx (Ryubing)"
+
+	if [ $wget_exit_code -eq 0 ]; then
+
+		copy_make_executable \
+			"$ryujinx_install_file" \
+			"$switch_install_emus_dir" \
+			"$ryujinx_emu_dir"
+
+		message "both" "$addon_log" "Ryujinx Canary installed successfully"
+
+		return 0
+	fi
+
+	message "both" "$addon_log" "ERROR: Unable to download Ryujinx Canary"
+
+	return 1
+}
 
 
 # INSTALL RYUJINX APPIMAGE
-install_emulator_ryujinx() {
-	message "log" "$addon_log" "<<< [ INSTALL RYUJINX APPIMAGE ]>>>"
+# install_emulator_ryujinx() {
+# 	message "log" "$addon_log" "<<< [ INSTALL RYUJINX APPIMAGE ]>>>"
 
-	# INSTALL/UNPACK EMULATOR
-	# EMULATOR INSTALL ARCHIVE/APP NOT FOUND LOCALLY THEN ATTEMPT TO DOWNLOAD
-	message "log" "$addon_log" "Installing Ryujinx Emulator App"
-	# Get lastest version from database & set the version for download
-    release=$(curl -fsL https://git.ryujinx.app/Ryubing/Canary/releases | grep -m1 -oP '/releases/tag/\K[0-9]+\.[0-9]+\.[0-9]+')    
-    # ryujinx_install_url="https://git.ryujinx.app/Ryubing/Canary/releases/download/${release}/ryujinx-canary-${release}-x64.AppImage"
-    ryujinx_install_url="https://git.ryujinx.app/Ryubing/Canary/releases/download/1.3.320/ryujinx-canary-1.3.320-x64.AppImage"
-    message "both" "$addon_log" "Ryujinx Version : $release"
-    message "both" "$addon_log" "Ryujinx url : $ryujinx_install_url"
+# 	INSTALL/UNPACK EMULATOR
+# 	EMULATOR INSTALL ARCHIVE/APP NOT FOUND LOCALLY THEN ATTEMPT TO DOWNLOAD
+# 	message "log" "$addon_log" "Installing Ryujinx Emulator App"
+# 	Get lastest version from database & set the version for download
+#     release=$(curl -fsL https://git.ryujinx.app/Ryubing/Canary/releases | grep -m1 -oP '/releases/tag/\K[0-9]+\.[0-9]+\.[0-9]+')   
+     
+#     ryujinx_install_url="https://git.ryujinx.app/Ryubing/Canary/releases/download/${release}/ryujinx-canary-${release}-x64.AppImage"
+#     ryujinx_install_url="https://git.ryujinx.app/Ryubing/Canary/releases/download/1.3.320/ryujinx-canary-1.3.320-x64.AppImage"
+#     message "both" "$addon_log" "Ryujinx Version : $release"
+#     message "both" "$addon_log" "Ryujinx url : $ryujinx_install_url"
     
-    #Installation du wrapper pour Ryujinx
-    copy_make_executable "ryu_wrapper" "$switch_install_extra_dir" "$switch_system_dir/extra/ryu_wrapper"
+#     Installation du wrapper pour Ryujinx
+#     copy_make_executable "ryu_wrapper" "$switch_install_extra_dir" "$switch_system_dir/extra/ryu_wrapper"
 
-	# If missing from local storage then attempt to download latest version
-	download_missing_file "$ryujinx_install_url" "$switch_install_emus_dir/$ryujinx_install_file" "Ryujinx (Ryubing)"
-	if [ $wget_exit_code -eq 0 ]; then
-		copy_make_executable "$ryujinx_install_file" "$switch_install_emus_dir" "$ryujinx_emu_dir"
-	fi
-}
+# 	If missing from local storage then attempt to download latest version
+# 	download_missing_file "$ryujinx_install_url" "$switch_install_emus_dir/$ryujinx_install_file" "Ryujinx (Ryubing)"
+# 	if [ $wget_exit_code -eq 0 ]; then
+# 		copy_make_executable "$ryujinx_install_file" "$switch_install_emus_dir" "$ryujinx_emu_dir"
+# 	fi
+# }
 
 # INSTALL YUZU APPIMAGE
 install_emulator_yuzu() {
@@ -121,41 +277,44 @@ install_emulator_eden_pgo() {
 }
 
 
-# install_emulator_eden_nightly() {
+install_emulator_eden_nightly() {
 
-#     # Latest version
-#     eden_release_version="$(curl -s https://nightly.eden-emu.dev/latest/release.json | jq -r .tag_name)"
+    # Latest version
+    eden_release_version="$(curl -s https://nightly.eden-emu.dev/latest/release.json | jq -r .tag_name)"
 
-#     # Detect platform
-#     pname="$(tr '[:upper:]' '[:lower:]' < /sys/class/dmi/id/product_name 2>/dev/null)"
+    # Extract build/hash from tag (v1790892656.d3550c4571 -> d3550c4571)
+    eden_build_version="${eden_release_version#*.}"
 
-#     case "$pname" in
-#         jupiter|galileo|*"steam deck"*)
-#             platform="steamdeck"
-#             eden_appimage="Eden-Linux-${eden_release_version}-steamdeck-gcc-standard.AppImage"
-#             ;;
-#         *rc71l*|*"rog ally"*|*"rog-ally"*)
-#             platform="rog-ally"
-#             eden_appimage="Eden-Linux-${eden_release_version}-rog-ally-gcc-standard.AppImage"
-#             ;;
-#         *)
-#             platform="generic"
-#             eden_appimage="Eden-Linux-${eden_release_version}-amd64-gcc-standard.AppImage"
-#             ;;
-#     esac
+    # Detect platform
+    pname="$(tr '[:upper:]' '[:lower:]' < /sys/class/dmi/id/product_name 2>/dev/null)"
 
-#     eden_install_url="https://nightly.eden-emu.dev/${eden_release_version}/${eden_appimage}"
+    case "$pname" in
+        jupiter|galileo|*"steam deck"*)
+            platform="steamdeck"
+            eden_appimage="Eden-Linux-${eden_build_version}-steamdeck-gcc-standard.AppImage"
+            ;;
+        *rc71l*|*"rog ally"*|*"rog-ally"*)
+            platform="rog-ally"
+            eden_appimage="Eden-Linux-${eden_build_version}-rog-ally-gcc-standard.AppImage"
+            ;;
+        *)
+            platform="generic"
+            eden_appimage="Eden-Linux-${eden_build_version}-amd64-gcc-standard.AppImage"
+            ;;
+    esac
+
+    eden_install_url="https://nightly.eden-emu.dev/${eden_release_version}/${eden_appimage}"
    
-#     message "both" "$addon_log" "Platform detected : $platform"
-#     message "both" "$addon_log" "Eden Version : $eden_appimage"
-#     message "both" "$addon_log" "Download URL       : $eden_install_url"
+    message "both" "$addon_log" "Platform detected : $platform"
+    message "both" "$addon_log" "Eden Version : $eden_build_version"
+    message "both" "$addon_log" "Download URL       : $eden_install_url"
 
-#     # Download & install
-#     download_missing_file "$eden_install_url" "$switch_install_emus_dir/$eden_install_file" "Eden"
-#     if [ $wget_exit_code -eq 0 ]; then
-#         copy_make_executable "$eden_install_file" "$switch_install_emus_dir" "$eden_emu_dir"
-#     fi
-# }
+    # Download & install
+    download_missing_file "$eden_install_url" "$switch_install_emus_dir/$eden_nightly_install_file" "Eden"
+    if [ $wget_exit_code -eq 0 ]; then
+        copy_make_executable "$eden_nightly_install_file" "$switch_install_emus_dir" "$eden_emu_dir"
+    fi
+}
 
 
 

@@ -359,6 +359,7 @@ class RyujinxGenerator(Generator):
         writelog("Controller mapping after: {}".format(str(sdl_mapping)))
         
         environment = { 
+                        "LD_LIBRARY_PATH": "/userdata/system/switch/appimages/ryujinx-extracted/usr/lib",
                         "SDL_JOYSTICK_HIDAPI": "1",
                         "SDL_JOYSTICK_HIDAPI_XBOX": "0",
                         "SDL_JOYSTICK_HIDAPI_XBOX_ONE": "0",
@@ -389,10 +390,21 @@ class RyujinxGenerator(Generator):
         #     # subprocess.run(["batocera-mouse", "hide"], check=False)
         #     commandArray = ["/userdata/system/switch/appimages/ryujinx-emu.AppImage", "-f", rom]
 
+        # if rom_nameq == 'ryujinx_config.xci_config':
+        #     commandArray = [ryujinx_wrapper, ryujinx_extracted]
+        # else:
+        #     commandArray = [ryujinx_wrapper, ryujinx_extracted, rom]
+
+        ryujinx_bin = "/userdata/system/switch/appimages/ryujinx-extracted/usr/bin/Ryujinx"
+        ryujinx_wrapper = "/userdata/system/switch/extra/ryu_wrapper"
+        ryujinx_libs = "/userdata/system/switch/appimages/ryujinx-extracted/usr/lib"
+
         if rom_nameq == 'ryujinx_config.xci_config':
-            commandArray = [ryujinx_wrapper, ryujinx_extracted]
+            commandArray = ["/userdata/system/switch/appimages/ryujinx-emu.AppImage"]
+            commandArray = [ryujinx_wrapper, ryujinx_bin]
         else:
-            commandArray = [ryujinx_wrapper, ryujinx_extracted, rom]
+            commandArray = ["/userdata/system/switch/appimages/ryujinx-emu.AppImage", rom]
+            commandArray = [ryujinx_wrapper, ryujinx_bin, rom]
 
         return Command.Command(array=commandArray, env=environment)
 

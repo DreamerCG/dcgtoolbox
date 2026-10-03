@@ -275,6 +275,8 @@ eden_saves_dir="$system_saves_dir/yuzu" # SAVES (NEW)
 # EMULATOR INSTALL FROM ARCHIVE/APP FILENAME
 eden_install_file="eden-emu.AppImage"
 eden_pgo_install_file="eden-pgo.AppImage"
+eden_nightly_install_file="eden-nightly.AppImage"
+
 # EMULATOR INSTALL FROM ARCHIVE/APP FILENAME URL (FOR DOWNLOAD IF NOT PRESENT)
 eden_install_url=""
 # EMULATOR DIRECTORY
