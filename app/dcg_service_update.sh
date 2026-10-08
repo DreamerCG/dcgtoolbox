@@ -104,6 +104,60 @@ if [ "$toolbox_version_local" != "$toolbox_download_version" ]; then
     echo "[$(date)] Mise à jour de configgen-defaults-arch.yml"
     curl -sL "$URL_BASE/switchlauncher.py" -o "$DIR_CONFIGGEN/switchlauncher.py"
     echo "[$(date)] Mise à jour de switchlauncher"
+
+    # Récupération récursive du dossier compat (nécessaire depuis Batocera 44).
+    # L'API GitHub fournit la liste complète des fichiers du dépôt ; on ne garde
+    # que ceux sous le configgen/compat de la version Batocera sélectionnée.
+    COMPAT_PREFIX="install/$folder_update_version/system/switch/configgen/compat/"
+    COMPAT_TREE_URL="https://api.github.com/repos/DreamerCG/dcgtoolbox/git/trees/main?recursive=1"
+    COMPAT_TMP="$(mktemp -d)"
+    COMPAT_STAGE="$COMPAT_TMP/compat"
+    COMPAT_TREE="$COMPAT_TMP/tree.json"
+    mkdir -p "$COMPAT_STAGE"
+
+    if ! curl -fsSL "$COMPAT_TREE_URL" -o "$COMPAT_TREE"; then
+        echo "[$(date)] ERREUR : impossible de récupérer l'arborescence GitHub pour compat"
+        rm -rf "$COMPAT_TMP"
+        exit 1
+    fi
+
+    if ! python3 - "$COMPAT_TREE" "$COMPAT_PREFIX" > "$COMPAT_TMP/files.txt" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as tree_file:
+    tree = json.load(tree_file)
+if tree.get("truncated"):
+    raise SystemExit("GitHub a retourné une arborescence tronquée")
+prefix = sys.argv[2]
+files = [item["path"] for item in tree.get("tree", [])
+         if item.get("type") == "blob" and item.get("path", "").startswith(prefix)]
+if not files:
+    raise SystemExit("Aucun fichier trouvé dans " + prefix)
+print("\n".join(files))
+PY
+    then
+        echo "[$(date)] ERREUR : impossible de lister les fichiers de compat"
+        rm -rf "$COMPAT_TMP"
+        exit 1
+    fi
+
+    while IFS= read -r compat_file; do
+        compat_relative="${compat_file#"$COMPAT_PREFIX"}"
+        compat_target="$COMPAT_STAGE/$compat_relative"
+        mkdir -p "$(dirname "$compat_target")"
+        if ! curl -fsSL "https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/$compat_file" -o "$compat_target"; then
+            echo "[$(date)] ERREUR : téléchargement impossible pour $compat_file"
+            rm -rf "$COMPAT_TMP"
+            exit 1
+        fi
+    done < "$COMPAT_TMP/files.txt"
+
+    rm -rf "$DIR_CONFIGGEN/compat"
+    mv "$COMPAT_STAGE" "$DIR_CONFIGGEN/compat"
+    rm -rf "$COMPAT_TMP"
+    echo "[$(date)] Mise à jour complète du dossier configgen/compat"
+
     curl -sL "$URL_BASE/generators/edenGenerator.py" -o "$DIR_GENERATOR/edenGenerator.py"
     echo "[$(date)] Mise à jour de EdenGenerator"
     curl -sL "$URL_BASE/generators/ryujinxGenerator.py" -o "$DIR_GENERATOR/ryujinxGenerator.py"
