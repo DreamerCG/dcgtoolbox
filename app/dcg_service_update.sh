@@ -37,6 +37,18 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo "[$(date)] ===== START TOOLBOX UPDATE ====="
 
+# Nettoyage de l'ancien système de compatibilité, désormais remplacé par le
+# lancement natif de Batocera 44.
+DIR_CONFIGGEN_USER="/userdata/system/switch/configgen"
+if [ -d "$DIR_CONFIGGEN_USER/compat" ]; then
+    if rm -rf "$DIR_CONFIGGEN_USER/compat"; then
+        echo "[$(date)] Suppression de l'ancien dossier configgen/compat"
+    else
+        echo "[$(date)] ERREUR : impossible de supprimer $DIR_CONFIGGEN_USER/compat"
+        exit 1
+    fi
+fi
+
 # Version locale
 if [ -f "$VERSION_FILE" ]; then
     toolbox_version_local="$(tr -d '\r\n' < "$VERSION_FILE")"
@@ -66,62 +78,43 @@ if [ "$toolbox_version_local" != "$toolbox_download_version" ]; then
         echo "[$(date)] Mise à jour détectée ($toolbox_version_local → $toolbox_download_version)"
     fi
     echo "[$(date)] Lancement par précautions du téléchargement des configgen…"
-    
+
     # Configuration des dossiers pour updates
     DIR_TOOLBOX="/userdata/DreamerCGToolBox/"
     DIR_EMULATIONSTATION="/userdata/system/configs/emulationstation"
     DIR_ROM_SWITCH="/userdata/roms/switch"
     DIR_ROM_IMAGES_SWITCH="/userdata/roms/switch/images"
     DIR_ROM_PORT="/userdata/roms/ports"
+    DIR_SWITCH="/userdata/system/switch"
     DIR_SWITCH_LOCAL_BIN="/userdata/system/switch/bin"
-    DIR_CONFIGGEN="/userdata/system/switch/configgen"
-    DIR_GENERATOR="/userdata/system/switch/configgen/generators"
 
     # echo "[$(date)] DEBUG folder_version=$folder_update_version"
 
-    URL_BASE="https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/$folder_update_version/system/switch/configgen"
     ULR_BIN="https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/$folder_update_version/system/switch/extra/packages"
 	URL_ROM_INSTALL="https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/roms/switch"
     URL_ROM_IMAGE_INSTALL="https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/roms/switch/images"
 
     mkdir -p "$DIR_TOOLBOX"
-    mkdir -p "$DIR_CONFIGGEN"
-    mkdir -p "$DIR_GENERATOR"
-    mkdir -p "$DIR_SWITCH_LOCAL_BIN/xdgfix"
     mkdir -p "$DIR_ROM_IMAGES_SWITCH"
 
-	echo "[$(date)] Configgen Local Dir   : $DIR_CONFIGGEN"
-	echo "[$(date)] Generator Local Dir  : $DIR_GENERATOR"
+	echo "[$(date)] Switch Local Dir     : $DIR_SWITCH"
 	echo "[$(date)] Image Local Dir  : $DIR_ROM_IMAGES_SWITCH"
-	echo "[$(date)] Distant URL          : $URL_BASE"
-    
-    # Téléchargement des nouveaux fichiers
-    curl -sL "$URL_BASE/configgen-defaults.yml" -o "$DIR_CONFIGGEN/configgen-defaults.yml"
-    echo "[$(date)] Mise à jour de configgen-defaults.yml"
-    curl -sL "$URL_BASE/qt-config.ini.template" -o "$DIR_CONFIGGEN/qt-config.ini.template"
-    echo "[$(date)] Mise à jour de qt-config.ini.template"    
-    curl -sL "$URL_BASE/configgen-defaults-arch.yml" -o "$DIR_CONFIGGEN/configgen-defaults-arch.yml"
-    echo "[$(date)] Mise à jour de configgen-defaults-arch.yml"
-    curl -sL "$URL_BASE/switchlauncher.py" -o "$DIR_CONFIGGEN/switchlauncher.py"
-    echo "[$(date)] Mise à jour de switchlauncher"
 
-    # Récupération récursive du dossier compat (nécessaire depuis Batocera 44).
-    # L'API GitHub fournit la liste complète des fichiers du dépôt ; on ne garde
-    # que ceux sous le configgen/compat de la version Batocera sélectionnée.
-    COMPAT_PREFIX="install/$folder_update_version/system/switch/configgen/compat/"
-    COMPAT_TREE_URL="https://api.github.com/repos/DreamerCG/dcgtoolbox/git/trees/main?recursive=1"
-    COMPAT_TMP="$(mktemp -d)"
-    COMPAT_STAGE="$COMPAT_TMP/compat"
-    COMPAT_TREE="$COMPAT_TMP/tree.json"
-    mkdir -p "$COMPAT_STAGE"
+    # Prépare une copie complète de system/switch depuis le dépôt, sans
+    # télécharger appimages : ce dossier appartient à l'utilisateur.
+    SWITCH_PREFIX="install/$folder_update_version/system/switch/"
+    SWITCH_TREE_URL="https://api.github.com/repos/DreamerCG/dcgtoolbox/git/trees/main?recursive=1"
+    SWITCH_TMP="$(mktemp -d /userdata/system/.switch-update.XXXXXX)"
+    SWITCH_STAGE="$SWITCH_TMP/switch"
+    mkdir -p "$SWITCH_STAGE"
 
-    if ! curl -fsSL "$COMPAT_TREE_URL" -o "$COMPAT_TREE"; then
-        echo "[$(date)] ERREUR : impossible de récupérer l'arborescence GitHub pour compat"
-        rm -rf "$COMPAT_TMP"
+    if ! curl -fsSL "$SWITCH_TREE_URL" -o "$SWITCH_TMP/tree.json"; then
+        echo "[$(date)] ERREUR : impossible de récupérer l'arborescence GitHub pour switch"
+        rm -rf "$SWITCH_TMP"
         exit 1
     fi
 
-    if ! python3 - "$COMPAT_TREE" "$COMPAT_PREFIX" > "$COMPAT_TMP/files.txt" <<'PY'
+    if ! python3 - "$SWITCH_TMP/tree.json" "$SWITCH_PREFIX" > "$SWITCH_TMP/files.txt" <<'PY'
 import json
 import sys
 
@@ -130,42 +123,80 @@ with open(sys.argv[1], encoding="utf-8") as tree_file:
 if tree.get("truncated"):
     raise SystemExit("GitHub a retourné une arborescence tronquée")
 prefix = sys.argv[2]
-files = [item["path"] for item in tree.get("tree", [])
-         if item.get("type") == "blob" and item.get("path", "").startswith(prefix)]
+files = [(item["mode"], item["path"]) for item in tree.get("tree", [])
+         if item.get("type") == "blob"
+         and item.get("path", "").startswith(prefix)
+         and not item["path"].startswith(prefix + "appimages/")]
 if not files:
     raise SystemExit("Aucun fichier trouvé dans " + prefix)
-print("\n".join(files))
+print("\n".join(mode + "\t" + path for mode, path in files))
 PY
     then
-        echo "[$(date)] ERREUR : impossible de lister les fichiers de compat"
-        rm -rf "$COMPAT_TMP"
+        echo "[$(date)] ERREUR : impossible de lister les fichiers du dossier switch"
+        rm -rf "$SWITCH_TMP"
         exit 1
     fi
 
-    while IFS= read -r compat_file; do
-        compat_relative="${compat_file#"$COMPAT_PREFIX"}"
-        compat_target="$COMPAT_STAGE/$compat_relative"
-        mkdir -p "$(dirname "$compat_target")"
-        if ! curl -fsSL "https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/$compat_file" -o "$compat_target"; then
-            echo "[$(date)] ERREUR : téléchargement impossible pour $compat_file"
-            rm -rf "$COMPAT_TMP"
+    while IFS=$'\t' read -r switch_mode switch_file; do
+        switch_relative="${switch_file#"$SWITCH_PREFIX"}"
+        switch_target="$SWITCH_STAGE/$switch_relative"
+        mkdir -p "$(dirname "$switch_target")"
+        if ! curl -fsSL "https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/$switch_file" -o "$switch_target"; then
+            echo "[$(date)] ERREUR : téléchargement impossible pour $switch_file"
+            rm -rf "$SWITCH_TMP"
             exit 1
         fi
-    done < "$COMPAT_TMP/files.txt"
+        if [ "$switch_mode" = "100755" ]; then
+            chmod a+x "$switch_target"
+        fi
+    done < "$SWITCH_TMP/files.txt"
 
-    rm -rf "$DIR_CONFIGGEN/compat"
-    mv "$COMPAT_STAGE" "$DIR_CONFIGGEN/compat"
-    rm -rf "$COMPAT_TMP"
-    echo "[$(date)] Mise à jour complète du dossier configgen/compat"
+    # Conserve appimages, met de côté l'ancien dossier, puis installe la
+    # nouvelle arborescence. En cas d'échec, restaure l'ancien dossier.
+    if [ -d "$DIR_SWITCH/appimages" ]; then
+        mv "$DIR_SWITCH/appimages" "$SWITCH_TMP/appimages" || {
+            echo "[$(date)] ERREUR : impossible de préserver $DIR_SWITCH/appimages"
+            rm -rf "$SWITCH_TMP"
+            exit 1
+        }
+    fi
+    if [ -e "$DIR_SWITCH" ]; then
+        mv "$DIR_SWITCH" "$SWITCH_TMP/old-switch" || {
+            [ ! -d "$SWITCH_TMP/appimages" ] || mv "$SWITCH_TMP/appimages" "$DIR_SWITCH/appimages"
+            echo "[$(date)] ERREUR : impossible de mettre de côté $DIR_SWITCH"
+            rm -rf "$SWITCH_TMP"
+            exit 1
+        }
+    fi
+    if ! mv "$SWITCH_STAGE" "$DIR_SWITCH"; then
+        [ ! -e "$SWITCH_TMP/old-switch" ] || mv "$SWITCH_TMP/old-switch" "$DIR_SWITCH"
+        [ ! -d "$SWITCH_TMP/appimages" ] || mv "$SWITCH_TMP/appimages" "$DIR_SWITCH/appimages"
+        echo "[$(date)] ERREUR : impossible d'installer le nouveau dossier switch"
+        rm -rf "$SWITCH_TMP"
+        exit 1
+    fi
+    if [ -d "$SWITCH_TMP/appimages" ]; then
+        if ! mv "$SWITCH_TMP/appimages" "$DIR_SWITCH/appimages"; then
+            rm -rf "$DIR_SWITCH"
+            mv "$SWITCH_TMP/old-switch" "$DIR_SWITCH"
+            mv "$SWITCH_TMP/appimages" "$DIR_SWITCH/appimages"
+            echo "[$(date)] ERREUR : impossible de restaurer appimages après la mise à jour"
+            rm -rf "$SWITCH_TMP"
+            exit 1
+        fi
+    fi
+    rm -rf "$SWITCH_TMP"
+    echo "[$(date)] Remplacement complet de system/switch effectué (appimages préservé)"
 
-    curl -sL "$URL_BASE/generators/edenGenerator.py" -o "$DIR_GENERATOR/edenGenerator.py"
-    echo "[$(date)] Mise à jour de EdenGenerator"
-    curl -sL "$URL_BASE/generators/ryujinxGenerator.py" -o "$DIR_GENERATOR/ryujinxGenerator.py"
-    echo "[$(date)] Mise à jour de ryujinxGenerator"
-    curl -sL "https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/gamecontrollerdb.txt" -o "$DIR_CONFIGGEN/gamecontrollerdb.txt"
-    echo "[$(date)] Mise à jour de Game Controller DB SDL"
-    curl -sL "$URL_BASE/generators/ryujinxloadfirmware.sh" -o "$DIR_GENERATOR/ryujinxloadfirmware.sh"
-    echo "[$(date)] Mise à jour de ryujinxloadfirmware"
+    # Ces scripts sont lancés directement par Batocera, même si Git les marque
+    # comme fichiers non exécutables.
+    chmod a+x "$DIR_SWITCH/configgen/switchlauncher.py"
+    chmod a+x "$DIR_SWITCH/configgen/generators/edenGenerator.py"
+    chmod a+x "$DIR_SWITCH/configgen/generators/ryujinxGenerator.py"
+    chmod a+x "$DIR_SWITCH/configgen/generators/ryujinxloadfirmware.sh"
+
+    mkdir -p "$DIR_SWITCH_LOCAL_BIN/xdgfix"
+
     curl -sL "$ULR_BIN/folder-open" -o "$DIR_SWITCH_LOCAL_BIN/xdgfix/xdg-open"
     echo "[$(date)] Mise à jour de bin/xdgfix/xdg-open"
 
@@ -192,10 +223,6 @@ PY
 
     echo "[$(date)] Mise à jour de es_systems_switch"
 
-    chmod a+x "$DIR_CONFIGGEN/switchlauncher.py"
-    chmod a+x "$DIR_GENERATOR/edenGenerator.py"
-    chmod a+x "$DIR_GENERATOR/ryujinxGenerator.py"
-    chmod a+x "$DIR_GENERATOR/ryujinxloadfirmware.sh"
     chmod a+x "$DIR_SWITCH_LOCAL_BIN/xdgfix/xdg-open"
 
     #On Verifie si les roms suivants existe dans /userdata/roms/switch/
@@ -318,9 +345,9 @@ done
     done
 
     # Nettoyage complementaire
-        if [ -f "$DIR_GENERATOR/gamecontroller_ryujinx.txt" ]; then
-             echo "[$(date)] Suppression de $DIR_GENERATOR/gamecontroller_ryujinx.txt"
-             rm $DIR_GENERATOR/gamecontroller_ryujinx.txt
+        if [ -f "$DIR_SWITCH/configgen/generators/gamecontroller_ryujinx.txt" ]; then
+             echo "[$(date)] Suppression de $DIR_SWITCH/configgen/generators/gamecontroller_ryujinx.txt"
+             rm "$DIR_SWITCH/configgen/generators/gamecontroller_ryujinx.txt"
         fi  
 
         if [ -f "$DIR_SWITCH_LOCAL_BIN/folder-open" ]; then

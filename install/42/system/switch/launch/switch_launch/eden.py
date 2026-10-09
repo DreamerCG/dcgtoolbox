@@ -1,0 +1,1114 @@
+from __future__ import annotations
+
+import filecmp
+import logging
+import os
+from os import environ
+import re
+import shutil
+import subprocess
+import sys
+import json
+import stat
+import glob
+import pathlib
+
+from shutil import copyfile
+from pathlib import Path
+from typing import TYPE_CHECKING
+from batocera_common.configparser import CaseSensitiveRawConfigParser
+from batocera_common.dataclasses import cached_dataclass, cached_property
+from batocera_common.paths import CACHE, CONFIGS, HOME, ROMS, SAVES
+from batocera_launch.command import Command
+from batocera_launch.devices.controller import generate_sdl_game_controller_config
+from batocera_launch.devices.input import Input, InputDict, InputMapping
+from batocera_launch.emulator import Emulator
+from batocera_launch.types import HotkeysContext
+
+
+def mkdir_if_not_exists(path) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
+from datetime import datetime
+from evdev import InputDevice, ecodes
+
+os.environ["PYSDL2_DLL_PATH"] = "/userdata/system/switch/configgen/sdl2/"
+os.environ["PATH"] = "/userdata/system/switch/extra/xdgfix:" + os.environ.get("PATH", "")
+
+import sdl2
+from sdl2 import joystick
+from ctypes import create_string_buffer
+
+eslog = logging.getLogger(__name__)
+
+
+class DictToObject:
+    def __init__(self, dictionary):
+        for key, value in dictionary.items():
+            if isinstance(value, dict):
+                value = DictToObject(value)
+            setattr(self, key, value)
+
+def switch_log(msg):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts} [SWITCH-DEBUG] {msg}", flush=True)
+
+def log_stderr(msg):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts} [SWITCH-DEBUG] {msg}", file=sys.stdout)	
+
+def ensure_symlink(target, link_path):
+    if os.path.exists(link_path):
+        if not os.path.islink(link_path):
+            shutil.rmtree(link_path)
+            os.symlink(target, link_path)
+        else:
+            if os.readlink(link_path) != target:
+                os.unlink(link_path)
+                os.symlink(target, link_path)
+    else:
+        os.symlink(target, link_path)
+
+def hidraw_get_guid(devpath):
+    try:
+        vid = pid = None
+        p = devpath
+        while p != "/" and p:
+            if os.path.exists(os.path.join(p, "idVendor")):
+                with open(os.path.join(p, "idVendor")) as f:
+                    vid = f.read().strip()
+                with open(os.path.join(p, "idProduct")) as f:
+                    pid = f.read().strip()
+                break
+            p = os.path.dirname(p)
+        if not vid or not pid:
+            return "00000000000000000000000000000000"
+        return f"{vid}{pid}000000000000000000000000"
+    except:
+        return "00000000000000000000000000000000"
+
+def list_hidraw_devices():
+    devices = []
+    for h in glob.glob("/sys/class/hidraw/hidraw*"):
+        dev = os.path.basename(h)
+        devpath = os.path.realpath(os.path.join(h, "device"))
+        # Nom humain
+        name = "unknown"
+        try:
+            with open(os.path.join(devpath, "uevent")) as f:
+                for line in f:
+                    if line.startswith("HID_NAME="):
+                        name = line.strip().split("=",1)[1]
+        except:
+            pass
+        # Bus USB / Bluetooth
+        bus = os.path.basename(devpath).split(":")[0]
+        guid = hidraw_get_guid(devpath)
+        devices.append({
+            "hidraw": f"/dev/{dev}",
+            "name": name,
+            "bus": bus,
+            "guid": guid
+        })
+    return devices
+
+def map_hidraw_to_evdev():
+    mapping = {}
+    for h in glob.glob("/sys/class/hidraw/hidraw*"):
+        hid = os.path.basename(h)
+        devpath = os.path.realpath(os.path.join(h, "device"))
+        for root, dirs, files in os.walk(devpath):
+            for d in dirs:
+                if d.startswith("event"):
+                    mapping[f"/dev/{hid}"] = f"/dev/input/{d}"
+    return mapping
+hidraws = list_hidraw_devices()
+hidmap = map_hidraw_to_evdev()
+for d in hidraws:
+    hid = d["hidraw"]
+    ev = hidmap.get(hid, "no evdev")
+
+
+def sdlmapping_to_controller(mapping, guid):
+
+    sdl_to_batoinputmapping = {
+        'a': 'b',
+        'b': 'a',
+        'y': 'x',
+        'x': 'y',
+        'lefttrigger': 'l2',
+        'righttrigger': 'r2',
+        'leftstick': 'l3',
+        'rightstick': 'r3',
+        'leftshoulder': 'pageup',
+        'rightshoulder': 'pagedown',
+        'start': 'start',
+        'back': 'select',
+        'dpup': 'up',
+        'dpdown': 'down',
+        'dpleft': 'left',
+        'dpright': 'right',
+        'lefty': 'joystick1up',
+        'leftx': 'joystick1left',
+        'righty': 'joystick2up',
+        'rightx': 'joystick2left',
+        'guide':  'hotkey'
+    }
+
+    elements = mapping.split(',')
+
+    current_controller = {
+        "guid": guid,
+        "platform": "",
+        "inputs": {}
+    }
+
+    for element in elements[2:]:
+        if not element:
+            continue
+
+        if element.startswith('platform:'):
+            current_controller["platform"] = element[9:]  # Extraire après "platform:"
+        elif ':' in element:
+            logical_name, physical_mapping = element.split(':', 1)
+
+            input_type = "unknown"
+            clean_value = physical_mapping  # Valeur par défaut
+
+            if physical_mapping.startswith('b'):
+                input_type = "button"
+                clean_value = physical_mapping[1:]  # Enlever le 'b'
+            elif physical_mapping.startswith('a'):
+                input_type = "axis"
+                clean_value = physical_mapping[1:]  # Enlever le 'a'
+            elif physical_mapping.startswith('h'):
+                input_type = "hat"
+                # Pour les hats, on conserve la partie après le 'h' qui contient des informations importantes
+                clean_value = physical_mapping[1:]  # Enlever le 'h'
+                clean_value_mask, clean_value = clean_value.split('.')
+
+            if logical_name in sdl_to_batoinputmapping:
+                logical_name = sdl_to_batoinputmapping[logical_name]
+
+            input = Input(name=logical_name, type=input_type, id=clean_value, value=1, code=0 )
+            current_controller["inputs"][logical_name] = input
+
+    return current_controller
+
+def evdev_to_hidraw():
+
+    evdev_hidraw = {}
+
+    for hid_path in glob.glob('/sys/class/hidraw/hidraw*'):
+        # Obtenir le chemin du périphérique
+        hid_dev = os.path.realpath(os.path.join(hid_path, "device"))
+
+        events = []
+        for root, dirs, files in os.walk(hid_dev):
+            for dir in dirs:
+                if dir.startswith("event"):
+                    event_path = os.path.join(root, dir)
+                    if "/input" in event_path and "/event" in event_path:
+                        events.append(event_path)
+        if events:
+            for ev in events:
+                ev_name = os.path.basename(ev)
+                hid_name = os.path.basename(hid_path)
+                evdev_hidraw[f"/dev/input/{ev_name}"] = f"/dev/{hid_name}"
+    return evdev_hidraw
+
+def detect_bus_from_hidraw(hidraw_path: str):
+    # pass /dev/hidrawx
+    hidraw_device = os.path.basename(hidraw_path)
+    sysfs_path = f"/sys/class/hidraw/{hidraw_device}/device"
+
+    if not os.path.exists(sysfs_path):
+        return f"Device {hidraw_device} not found in sysfs"
+
+    # Resolve the real path (follows symlinks)
+    try:
+        real_device_path = os.path.realpath(sysfs_path)
+        bus_prefix = os.path.basename(real_device_path).split(":")[0]
+    except Exception as e:
+        return f"Error reading device path: {e}"
+
+    return bus_prefix[2:]
+
+def list_sdl_gamepads(sdlversion):
+
+    # os.environ["SDL_JOYSTICK_HIDAPI"] = "1"
+    # os.environ["SDL_JOYSTICK_HIDAPI_XBOX"] = "0"
+    # os.environ["SDL_JOYSTICK_HIDAPI_XBOX_ONE"] = "0"
+    # os.environ["SDL_JOYSTICK_HIDAPI_SWITCH"] = "0"
+    # os.environ["SDL_JOYSTICK_HIDAPI_STEAMDECK"] = "0"
+
+    os.environ["SDL_JOYSTICK_HIDAPI"] = "1"
+    os.environ["SDL_JOYSTICK_HIDAPI_PS4"] = "0"
+    os.environ["SDL_JOYSTICK_HIDAPI_PS5"] = "0"
+    os.environ["SDL_JOYSTICK_HIDAPI_SWITCH"] = "0"
+    os.environ["SDL_JOYSTICK_HIDAPI_XBOX"] = "0"   #it's disable in yuzu for xbox
+    os.environ["SDL_JOYSTICK_HIDAPI_STEAMDECK"] = "0"  #reported by frolabroc, not tested myself yet
+    os.environ["SDL_GAMECONTROLLERCONFIG_FILE"] = "/userdata/system/switch/configgen/gamecontrollerdb.txt"
+    sdl2.SDL_ClearError()
+    try:
+      ret = sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER)
+    except:
+      print("An exception occurred")
+
+    count = joystick.SDL_NumJoysticks()
+
+    sdl_devices = {}
+
+    for i in range(count):
+        if sdl2.SDL_IsGameController(i) == 1:
+            pad = sdl2.SDL_GameControllerOpen(i)
+            path = sdl2.SDL_GameControllerPath(pad)
+
+            joy_guid = joystick.SDL_JoystickGetDeviceGUID(i)
+            buff = create_string_buffer(33)
+            joystick.SDL_JoystickGetGUIDString(joy_guid,buff,33)
+            buff[2] = b'0'
+            buff[3] = b'0'
+            buff[4] = b'0'
+            buff[5] = b'0'
+            buff[6] = b'0'
+            buff[7] = b'0'
+            guidstring = ((bytes(buff)).decode()).split('\x00',1)[0]
+            joy_path = joystick.SDL_JoystickPathForIndex(i).decode()
+
+            #sdl3 have implemented bus type in hidraw guid, we still use old sdl2 for this script
+            if 'hidraw' in joy_path and sdlversion == 3:
+                bustype = detect_bus_from_hidraw(joy_path)
+                guidstring = bustype + guidstring[2:]
+
+            mapping = sdl2.SDL_GameControllerMapping(pad);
+            import pprint
+            pprint.pprint(mapping)
+            mapping = mapping.decode() if isinstance(mapping, bytes) else str(mapping)
+            eslog.debug(mapping)
+            controller = sdlmapping_to_controller(mapping, guidstring)
+            sdl_devices[joy_path] = controller
+
+    sdl2.SDL_Quit()
+
+    return sdl_devices
+
+def read_file_lower(path):
+    try:
+        return pathlib.Path(path).read_text().strip().lower()
+    except FileNotFoundError:
+        return ""
+
+def is_steamdeck():
+    pname = read_file_lower("/sys/class/dmi/id/product_name")
+    vendor = read_file_lower("/sys/class/dmi/id/sys_vendor")
+
+    if pname in ("jupiter", "galileo"):
+        return True
+    if "steam deck" in pname:
+        return True
+
+    return False
+
+@cached_dataclass
+class Eden(Emulator):
+    @property
+    def handles_bezels(self) -> bool:
+        return True
+
+    @cached_property
+    def in_game_ratio(self) -> float:
+        return 16 / 9
+
+
+    @cached_property
+    def hotkeygen_context(self) -> HotkeysContext:
+        return {
+            "name": "switch-emu",
+            "keys": { "exit": ["KEY_LEFTALT", "KEY_F4"]}
+        }
+
+    @property
+    def execution_path(self) -> Path | None:
+        return Path("/userdata/system/switch/appimages")
+
+    async def configure(self) -> Command:
+        config = self.config
+        rom = self.rom
+        playersControllers = list(self.controllers)
+
+        emulator = config.emulator
+
+        if emulator == 'citron-emu':
+            emudir = 'citron'
+        elif emulator == 'eden-pgo':
+            emudir = 'eden'
+        elif emulator == 'eden-emu':
+            emudir = 'eden'
+        elif emulator == 'eden-nightly':
+            emudir = 'eden'
+        else:
+            emudir = emulator
+
+        sdlversion = 2
+        if emulator == 'citron-emu':
+            sdlversion = 3
+
+        #handles chmod so you just need to download yuzu.AppImage
+        st = os.stat("/userdata/system/switch/appimages/"+emulator+".AppImage")
+        os.chmod("/userdata/system/switch/appimages/"+emulator+".AppImage", st.st_mode | stat.S_IEXEC)
+
+        #Create Keys/Firmware Folder
+        mkdir_if_not_exists(Path("/userdata/bios/switch"))
+        mkdir_if_not_exists(Path("/userdata/bios/switch/keys"))
+        mkdir_if_not_exists(Path("/userdata/bios/switch/firmware"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/system"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/system/Contents"))
+        mkdir_if_not_exists(Path("/userdata/roms/switch_update"))
+        mkdir_if_not_exists(Path("/userdata/roms/switch_update/dlc"))
+        mkdir_if_not_exists(Path("/userdata/roms/switch_update/update"))
+
+        #Link Yuzu firmware/key folder
+        # YUZU KEYS
+        ensure_symlink(
+            "/userdata/bios/switch/keys",
+            "/userdata/system/configs/yuzu/keys"
+        )
+
+        # YUZU FIRMWARE
+        ensure_symlink(
+            "/userdata/bios/switch/firmware",
+            "/userdata/system/configs/yuzu/nand/system/Contents/registered"
+        )
+
+        #Link Yuzu App Directory to /system/configs/yuzu
+        mkdir_if_not_exists(Path("/userdata/system/.local"))
+        mkdir_if_not_exists(Path("/userdata/system/.local/share"))
+
+        #Remove .local/share/yuzu if it exists and isnt' a link
+        if os.path.exists("/userdata/system/.local/share/"+emudir):
+            if not os.path.islink("/userdata/system/.local/share/"+emudir):
+                shutil.rmtree("/userdata/system/.local/share/"+emudir)
+
+        if not os.path.exists("/userdata/system/.local/share/"+emudir):
+            st = os.symlink("/userdata/system/configs/yuzu","/userdata/system/.local/share/"+emudir)
+
+        #Link Yuzu Config Directory to /system/configs/yuzu
+        mkdir_if_not_exists(Path("/userdata/system/.config"))
+
+        #Remove .config/yuzu if it exists and isnt' a link
+        if os.path.exists("/userdata/system/.config/"+emudir):
+            if not os.path.islink("/userdata/system/.config/"+emudir):
+                shutil.rmtree("/userdata/system/.config/"+emudir)
+
+        if not os.path.exists("/userdata/system/.config/"+emudir):
+            st = os.symlink("/userdata/system/configs/yuzu","/userdata/system/.config/"+emudir)
+
+        #Remove configs/emu if it exists and isnt' a link
+        if os.path.exists("/userdata/system/configs/"+emudir):
+            if not os.path.islink("/userdata/system/configs/"+emudir):
+                shutil.rmtree("/userdata/system/configs/"+emudir)
+
+        if not os.path.exists("/userdata/system/configs/"+emudir):
+            st = os.symlink("/userdata/system/configs/yuzu","/userdata/system/configs/"+emudir)
+
+        cachedir = ".cache/" + emudir
+        mkdir_if_not_exists(Path("/userdata/system/.cache"))
+        mkdir_if_not_exists(Path("/userdata/system/" + cachedir))
+
+        if emudir == 'eden':
+            mkdir_if_not_exists(Path("/userdata/system/.cache/AppImage-Cache/" + emudir))
+            mkdir_if_not_exists(Path("/userdata/system/configs/" + emudir + "/shader"))
+            ensure_symlink(
+                "/userdata/system/configs/" + emudir + "/shader",
+                "/userdata/system/.cache/AppImage-Cache/" + emudir + "/shader"
+            )
+
+        # #remove game_list if it exists and isn't a link
+        # if os.path.exists("/userdata/system/.cache/"+emudir+"/game_list"):
+            # if not os.path.islink("/userdata/system/.cache/"+emudir+"/game_list"):
+                # shutil.rmtree("/userdata/system/.cache/"+emudir+"/game_list")
+
+        # mkdir_if_not_exists(Path("/userdata/saves/yuzu"))
+        # mkdir_if_not_exists(Path("/userdata/saves/yuzu/game_list"))
+        # if not os.path.exists("/userdata/system/.cache/"+emudir+"/game_list"):
+            # st = os.symlink("/userdata/saves/yuzu/game_list","/userdata/system/.cache/"+emudir+"/game_list")
+
+        #Create Save/Mods Folder
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/user"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/user/save"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/load"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch/eden_citron"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch/eden_citron/save"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch/eden_citron/save/save_user"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch/eden_citron/save/save_system"))
+        mkdir_if_not_exists(Path("/userdata/saves/switch/eden_citron/mods"))
+        mkdir_if_not_exists(Path("/userdata/system/configs/yuzu/nand/system/save"))
+
+        # Yuzu User XDG 
+        if os.path.exists("/userdata/system/switch/extra/xdgfix/xdg-open"):
+            st = os.stat("/userdata/system/switch/extra/xdgfix/xdg-open")
+            os.chmod("/userdata/system/switch/extra/xdgfix/xdg-open", st.st_mode | stat.S_IEXEC)
+
+        # YUZU USER SAVE
+        ensure_symlink(
+            "/userdata/saves/switch/eden_citron/save/save_user",
+            "/userdata/system/configs/yuzu/nand/user/save"
+        )
+        # YUZU SYSTEM SAVE
+        ensure_symlink(
+            "/userdata/saves/switch/eden_citron/save/save_system",
+            "/userdata/system/configs/yuzu/nand/system/save"
+        )
+        # YUZU MODS
+        ensure_symlink(
+            "/userdata/saves/switch/eden_citron/mods",
+            "/userdata/system/configs/yuzu/load"
+        )
+
+        yuzuConfig = str(CONFIGS) + '/yuzu/qt-config.ini'
+        yuzuConfigTemplate = '/userdata/system/switch/configgen/qt-config.ini.template'
+
+        Eden.writeYuzuConfig(yuzuConfig, yuzuConfigTemplate, config, playersControllers, sdlversion, emulator)
+
+        # commandArray = ["./"+emulator+".AppImage", "-f",  "-g", rom ]
+
+        # Cas spécial : Home Menu
+        BASE_COMMAND = {
+            "emulator": emulator,
+            "use_rom": True,
+            "qlaunch": False,
+        }
+
+        XCI_CONFIG_MAP = {
+            "citron_config.xci_config": {
+                "emulator": "citron-emu",
+                "qlaunch": False,
+                "use_rom": False,
+            },
+            "eden_config.xci_config": {
+                "emulator": "eden-emu",
+                "qlaunch": False,
+                "use_rom": False,                                
+            },
+            "eden_qlaunch.xci_config": {
+                "emulator": "eden-emu",
+                "qlaunch": True,
+                "use_rom": False,                                
+            },
+        }
+
+        rom_nameq = os.path.basename(rom)
+        cfg = XCI_CONFIG_MAP.get(rom_nameq, BASE_COMMAND)
+
+        emulator_to_use = cfg["emulator"]
+        use_qlaunch = cfg["qlaunch"]
+        use_rom = cfg["use_rom"]
+
+        commandArray = [
+            f"./{emulator_to_use}.AppImage",
+            "-f",
+        ]
+
+        if use_qlaunch:
+            commandArray.append("-qlaunch")
+
+        if use_rom:
+            commandArray.extend(["-g", rom])
+
+        environment = { "DRI_PRIME":"1",
+                        "AMD_VULKAN_ICD":"RADV",
+                        "DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1":"1",
+                        "QT_XKB_CONFIG_ROOT":"/usr/share/X11/xkb",
+#                        "LC_ALL":"C.utf8",
+                        "NO_AT_BRIDGE":"1",
+                        "XDG_MENU_PREFIX":"batocera-",
+                        "XDG_CONFIG_DIRS":"/etc/xdg",
+                        "XDG_CURRENT_DESKTOP":"XFCE",
+                        "DESKTOP_SESSION":"XFCE",
+                        
+                        "SDL_JOYSTICK_HIDAPI":"1",
+                        "SDL_JOYSTICK_HIDAPI_STEAMDECK":"0",
+                        "SDL_JOYSTICK_HIDAPI_PS4":"0",
+                        "SDL_JOYSTICK_HIDAPI_PS5":"0",
+                        "SDL_JOYSTICK_HIDAPI_SWITCH":"0",
+                        "SDL_JOYSTICK_HIDAPI_XBOX":"0",
+
+                        "XDG_CONFIG_HOME":"/userdata/system/configs",
+                        "XDG_DATA_HOME":"/userdata/system/configs",
+                        "XDG_CACHE_HOME":"/userdata/system/.cache",
+
+
+                        "QT_FONT_DPI":"96",
+                        "QT_SCALE_FACTOR":"1",
+                        "GDK_SCALE":"1",
+                        "QT_QPA_PLATFORM": "xcb",
+                        "USER":"root",
+                        "LANG":"en_US.UTF-8",
+        }
+
+        return Command(args=commandArray, env=environment)
+
+
+    @staticmethod
+    def writeYuzuConfig(yuzuConfigFile, yuzuConfigTemplateFile, config, playersControllers, sdlversion, emulator):
+        # pads
+
+        yuzuButtonsMapping = {
+             "button_a":      "a",
+             "button_b":      "b",
+             "button_x":      "x",
+             "button_y":      "y",
+             "button_dup":    "up",
+             "button_ddown":  "down",
+             "button_dleft":  "left",
+             "button_dright": "right",
+             "button_l":      "pageup",
+             "button_r":      "pagedown",
+             "button_plus":   "start",
+             "button_minus":  "select",
+             "button_slleft": "pageup",
+             "button_srleft": "pagedown",
+             "button_slright": "pageup",
+             "button_srright": "pagedown",
+             "button_zl":     "l2",
+             "button_zr":     "r2",
+             "button_lstick": "l3",
+             "button_rstick": "r3",
+             "button_home":   "hotkey"
+        }
+
+        yuzuAxisMapping = {
+             "lstick":    "joystick1",
+             "rstick":    "joystick2"
+        }
+
+        # ini file
+        yuzuConfig = CaseSensitiveRawConfigParser()
+        yuzuConfig.optionxform=str
+
+        if os.path.exists(yuzuConfigFile):
+            yuzuConfig.read(yuzuConfigFile)
+        # Sinon première création depuis template
+        elif os.path.exists(yuzuConfigTemplateFile):
+            yuzuConfig.read(yuzuConfigTemplateFile)
+
+
+    # UI section
+        if not yuzuConfig.has_section("UI"):
+            yuzuConfig.add_section("UI")
+
+        yuzuConfig.set("UI", "enable_discord_presence", "false")
+        yuzuConfig.set("UI", "enable_discord_presence\\default", "false")
+
+        yuzuConfig.set("UI", "check_for_updates_on_start", "false")
+        yuzuConfig.set("UI", "check_for_updates_on_start\\default", "false")
+
+        yuzuConfig.set("UI", "check_for_updates", "false")
+        yuzuConfig.set("UI", "check_for_updates\\default", "false")
+
+        yuzuConfig.set("UI", "UIGameList\\cache_game_list", "true")
+        yuzuConfig.set("UI", "UIGameList\\cache_game_list\\default", "true")
+
+        # Common external path (dlc/update)
+        yuzuConfig.set("UI", "Paths\\external_content_dirs\\size", "2")
+        yuzuConfig.set("UI", "Paths\\external_content_dirs\\1\\path", "/userdata/roms/switch_update/dlc/")
+        yuzuConfig.set("UI", "Paths\\external_content_dirs\\2\\path", "/userdata/roms/switch_update/update/")
+
+        #citron shortcuts
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\size", "1")#adjust to number of shortcut sets
+        #exit citron
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\name", "Exit citron")
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\group", "Main Window")
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\keyseq", "Ctrl+Q")
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\controller_keyseq", "Minus+Plus")
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\context", "1")
+        yuzuConfig.set("UI", "Shortcuts\\shortcuts\\1\\repeat", "false")
+
+        #exit eden
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\KeySeq", "Ctrl+Q")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\Controller_KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\Controller_KeySeq", "Minus+Plus")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\Context\\default", "true")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Exit%20eden\\Context", "1")
+
+        #fullscreen eden
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\KeySeq", "F11")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\Controller_KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\Controller_KeySeq", "Home+B")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\Context\\default", "true")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Fullscreen\\Context", "1")
+
+        #pause eden
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\KeySeq", "F4")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\Controller_KeySeq\\default", "false")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\Controller_KeySeq", "")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\Context\\default", "true")
+        yuzuConfig.set("UI", "Shortcuts\\Main%20Window\\Continue\\Pause%20Emulation\\Context", "1")
+
+        yuzuConfig.set("UI", "Paths\\romsPath", "/userdata/roms/switch")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\1\\deep_scan", "true")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\1\\deep_scan\\default", "false")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\1\\expanded", "true")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\1\\expanded\\default", "true")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\1\\path", "/userdata/roms/switch")
+        yuzuConfig.set("UI", "Paths\\gamedirs\\size", "3")
+
+        # Interface language (citron)
+        if ('yuzu_intlanguage' in config):
+            yuzuConfig.set("UI", "Paths\\language", config["yuzu_intlanguage"])
+            yuzuConfig.set("UI", "Paths\\language\\default", "false")
+        else:
+            yuzuConfig.set("UI", "Paths\\language", "en")
+            yuzuConfig.set("UI", "Paths\\language\\default", "true")
+
+        # Single Window Mode
+        if ('single_window' in config):
+            yuzuConfig.set("UI", "singleWindowMode", config["single_window"])
+            yuzuConfig.set("UI", "singleWindowMode\\default", "false")
+        else:
+            yuzuConfig.set("UI", "singleWindowMode", "true")
+            yuzuConfig.set("UI", "singleWindowMode\\default", "true")
+
+        # User Profile select on boot
+        if ('user_profile' in config):
+            yuzuConfig.set("UI", "select_user_on_boot", config["user_profile"])
+            yuzuConfig.set("UI", "select_user_on_boot\\default", "false")
+        else:
+            yuzuConfig.set("UI", "select_user_on_boot", "true")
+            yuzuConfig.set("UI", "select_user_on_boot\\default", "true")
+
+        # Skip Citron animation/message
+        yuzuConfig.set("UI", "showIntroAnimation", "false")
+        yuzuConfig.set("UI", "showIntroAnimation\\default", "false")
+        yuzuConfig.set("UI", "farewellShown", "true")
+        yuzuConfig.set("UI", "farewellShown\\default", "false")
+
+        # Confirm exit off
+        yuzuConfig.set("UI", "confirmStop", "2")
+        yuzuConfig.set("UI", "confirmStop\\default", "false")
+
+    # Core section
+        if not yuzuConfig.has_section("Core"):
+            yuzuConfig.add_section("Core")
+
+        # Multicore
+        if ('multicore' in config):
+            yuzuConfig.set("Core", "use_multi_core", config["multicore"])
+            yuzuConfig.set("Core", "use_multi_core\\default", "false")
+        else:
+            yuzuConfig.set("Core", "use_multi_core", "true")
+            yuzuConfig.set("Core", "use_multi_core\\default", "true")
+
+        # Memory layout
+        if ('yuzu_memory_layout' in config):
+            yuzuConfig.set("Core", "memory_layout_mode", config["yuzu_memory_layout"])
+            yuzuConfig.set("Core", "memory_layout_mode\\default", "false")
+        else:
+            yuzuConfig.set("Core", "memory_layout_mode", "0")
+            yuzuConfig.set("Core", "memory_layout_mode\\default", "true")
+
+    # Renderer section
+        if not yuzuConfig.has_section("Renderer"):
+            yuzuConfig.add_section("Renderer")
+
+        # Extended Dynamic State Fix for V43 ZEN3
+        if is_steamdeck():
+            yuzuConfig.set("Renderer", "extended_dynamic_state", "0")
+            yuzuConfig.set("Renderer", "extended_dynamic_state\\default", "false")
+        # Aspect ratio
+        if ('yuzu_ratio' in config):
+            yuzuConfig.set("Renderer", "aspect_ratio", config["yuzu_ratio"])
+            yuzuConfig.set("Renderer", "aspect_ratio\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "aspect_ratio", "0")
+            yuzuConfig.set("Renderer", "aspect_ratio\\default", "true")
+
+        # Graphical backend
+        if emulator == "citron-emu":
+            yuzuConfig.set("Renderer", "backend", "0")
+            yuzuConfig.set("Renderer", "backend\\default", "true")
+        elif ('yuzu_backend' in config):
+            yuzuConfig.set("Renderer", "backend", config["yuzu_backend"])
+            yuzuConfig.set("Renderer", "backend\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "backend", "1")
+            yuzuConfig.set("Renderer", "backend\\default", "true")
+
+        # Async Shader compilation
+        if ('async_shaders' in config):
+            yuzuConfig.set("Renderer", "use_asynchronous_shaders", config["async_shaders"])
+            yuzuConfig.set("Renderer", "use_asynchronous_shaders\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "use_asynchronous_shaders", "false")
+            yuzuConfig.set("Renderer", "use_asynchronous_shaders\\default", "true")
+
+        # Assembly shaders
+        if ('shaderbackend' in config):
+            yuzuConfig.set("Renderer", "shader_backend", config["shaderbackend"])
+            yuzuConfig.set("Renderer", "shader_backend\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "shader_backend", "0")
+            yuzuConfig.set("Renderer", "shader_backend\\default", "true")
+
+        # Async Gpu Emulation
+        if ('async_gpu' in config):
+            yuzuConfig.set("Renderer", "use_asynchronous_gpu_emulation", config["async_gpu"])
+            yuzuConfig.set("Renderer", "use_asynchronous_gpu_emulation\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "use_asynchronous_gpu_emulation", "true")
+            yuzuConfig.set("Renderer", "use_asynchronous_gpu_emulation\\default", "true")
+
+        # NVDEC Emulation
+        if ('nvdec_emu' in config):
+            yuzuConfig.set("Renderer", "nvdec_emulation", config["nvdec_emu"])
+            yuzuConfig.set("Renderer", "nvdec_emulation\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "nvdec_emulation", "2")
+            yuzuConfig.set("Renderer", "nvdec_emulation\\default", "true")
+
+        # Gpu Accuracy
+        if ('gpuaccuracy' in config):
+            yuzuConfig.set("Renderer", "gpu_accuracy", config["gpuaccuracy"])
+        else:
+            yuzuConfig.set("Renderer", "gpu_accuracy", "1")
+        yuzuConfig.set("Renderer", "gpu_accuracy\\default", "false")
+
+        # Vsync
+        if ('vsync' in config):
+            yuzuConfig.set("Renderer", "use_vsync", config["vsync"])
+            yuzuConfig.set("Renderer", "use_vsync\\default", "false")
+            if config["vsync"] == "2":
+                yuzuConfig.set("Renderer", "use_vsync\\default", "true")
+        else:
+            yuzuConfig.set("Renderer", "use_vsync", "1")
+            yuzuConfig.set("Renderer", "use_vsync\\default", "false")
+
+        # Gpu cache garbage collection
+        if ('gpu_cache_gc' in config):
+            yuzuConfig.set("Renderer", "use_caches_gc", config["gpu_cache_gc"])
+        else:
+            yuzuConfig.set("Renderer", "use_caches_gc", "false")
+        yuzuConfig.set("Renderer", "use_caches_gc\\default", "false")
+
+        # Max anisotropy
+        if ('anisotropy' in config):
+            yuzuConfig.set("Renderer", "max_anisotropy", config["anisotropy"])
+            yuzuConfig.set("Renderer", "max_anisotropy\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "max_anisotropy", "0")
+            yuzuConfig.set("Renderer", "max_anisotropy\\default", "true")
+
+        # Fullscreen mode
+        if ('fullscreen_mode' in config):
+            yuzuConfig.set("Renderer", "fullscreen_mode", config["fullscreen_mode"])
+            yuzuConfig.set("Renderer", "fullscreen_mode\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "fullscreen_mode", "1")
+            yuzuConfig.set("Renderer", "fullscreen_mode\\default", "true")
+
+        if emulator == "citron-emu":
+            # Resolution scaler
+            if ('citron_resolution_scale' in config):
+                print ("Use Resolution Scale for Citron:",config["citron_resolution_scale"], file=sys.stderr)
+                yuzuConfig.set("Renderer", "resolution_setup", config["citron_resolution_scale"])
+                yuzuConfig.set("Renderer", "resolution_setup\\default", "false")
+            else:
+                yuzuConfig.set("Renderer", "resolution_setup", "3")
+                yuzuConfig.set("Renderer", "resolution_setup\\default", "true")
+        else:        
+            # Resolution scaler
+            if ('resolution_scale' in config):
+                print ("Use Resolution Scale for Eden :",config["resolution_scale"], file=sys.stderr)
+                yuzuConfig.set("Renderer", "resolution_setup", config["resolution_scale"])
+                yuzuConfig.set("Renderer", "resolution_setup\\default", "false")
+            else:
+                yuzuConfig.set("Renderer", "resolution_setup", "2")
+                yuzuConfig.set("Renderer", "resolution_setup\\default", "true")
+
+        # Scaling filter
+        if ('scale_filter' in config):
+            yuzuConfig.set("Renderer", "scaling_filter", config["scale_filter"])
+            yuzuConfig.set("Renderer", "scaling_filter\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "scaling_filter", "1")
+            yuzuConfig.set("Renderer", "scaling_filter\\default", "true")
+
+        # FSR Quality
+        if ('fsr_quality' in config):
+            yuzuConfig.set("Renderer", "fsr2_quality_mode", config["fsr_quality"])
+            yuzuConfig.set("Renderer", "fsr2_quality_mode\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "fsr2_quality_mode", "0")
+            yuzuConfig.set("Renderer", "fsr2_quality_mode\\default", "true")
+
+        # Anti aliasing method
+        if ('aliasing_method' in config):
+            yuzuConfig.set("Renderer", "anti_aliasing", config["aliasing_method"])
+            yuzuConfig.set("Renderer", "anti_aliasing\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "anti_aliasing", "0")
+            yuzuConfig.set("Renderer", "anti_aliasing\\default", "true")
+
+        #ASTC Decoding Method
+        if ('accelerate_astc' in config):
+            yuzuConfig.set("Renderer", "accelerate_astc", config["accelerate_astc"])
+            yuzuConfig.set("Renderer", "accelerate_astc\\default", "false")
+        else:
+            yuzuConfig.set("Renderer", "accelerate_astc", "1")
+            yuzuConfig.set("Renderer", "accelerate_astc\\default", "true")
+
+        # ASTC Texture Recompression
+        if ('astc_recompression' in config):
+
+            yuzuConfig.set("Renderer", "astc_recompression", config["astc_recompression"])
+            yuzuConfig.set("Renderer", "astc_recompression\\default", "false")
+            if config["astc_recompression"] == "0":
+                yuzuConfig.set("Renderer", "use_vsync\\default", "true")
+            yuzuConfig.set("Renderer", "async_astc", "false")
+            yuzuConfig.set("Renderer", "async_astc\\default", "true")
+        else:
+            yuzuConfig.set("Renderer", "astc_recompression", "0")
+            yuzuConfig.set("Renderer", "astc_recompression\\default", "true")
+            yuzuConfig.set("Renderer", "async_astc", "false")
+            yuzuConfig.set("Renderer", "async_astc\\default", "true")
+
+
+    # Cpu Section
+        if not yuzuConfig.has_section("Cpu"):
+            yuzuConfig.add_section("Cpu")
+
+        # Cpu Accuracy
+        if ('cpuaccuracy' in config):
+            yuzuConfig.set("Cpu", "cpu_accuracy", config["cpuaccuracy"])
+            yuzuConfig.set("Cpu", "cpu_accuracy\\default", "false")
+        else:
+            yuzuConfig.set("Cpu", "cpu_accuracy", "0")
+            yuzuConfig.set("Cpu", "cpu_accuracy\\default", "true")
+
+
+    # System section
+        if not yuzuConfig.has_section("System"):
+            yuzuConfig.add_section("System")
+
+        # Language
+        if ('language' in config):
+            yuzuConfig.set("System", "language_index", config["language"])
+            yuzuConfig.set("System", "language_index\\default", "false")
+        else:
+            yuzuConfig.set("System", "language_index", "1")
+            yuzuConfig.set("System", "language_index\\default", "true")
+
+        # Audio Mode
+        if ('audio_mode' in config):
+            yuzuConfig.set("System", "sound_index", config["audio_mode"])
+            yuzuConfig.set("System", "sound_index\\default", "false")
+        else:
+            yuzuConfig.set("System", "sound_index", "1")
+            yuzuConfig.set("System", "sound_index\\default", "true")
+
+        # Region
+        if ('region' in config):
+            yuzuConfig.set("System", "region_index", config["region"])
+            yuzuConfig.set("System", "region_index\\default", "false")
+        else:
+            yuzuConfig.set("System", "region_index", "1")
+            yuzuConfig.set("System", "region_index\\default", "true")
+
+        # Dock Mode
+        if ('dock_mode' in config):
+            if config["dock_mode"] == "1":
+                yuzuConfig.set("System", "use_docked_mode", "1")
+                yuzuConfig.set("System", "use_docked_mode\\default", "true")
+            elif config["dock_mode"] == "0":
+                yuzuConfig.set("System", "use_docked_mode", "0")
+                yuzuConfig.set("System", "use_docked_mode\\default", "false")
+        else:
+            yuzuConfig.set("System", "use_docked_mode", "1")
+            yuzuConfig.set("System", "use_docked_mode\\default", "true")
+
+
+    # controls section
+        if not yuzuConfig.has_section("Controls"):
+            yuzuConfig.add_section("Controls")
+
+        if not ('yuzu_auto_controller_config' in config) or config["yuzu_auto_controller_config"] != "0":
+            #get the evdev->hidraw mapping
+            evdev_hidraw = evdev_to_hidraw()
+            #get sdllib  hidapi/hidraw + evdev guid
+            sdl_gamepads = list_sdl_gamepads(sdlversion)
+
+
+            nplayer = 0
+            guid_port = {}
+            for nplayer, pad in enumerate(playersControllers, start=0):
+                player_nb_str = "player_" + str(nplayer)
+
+                hidraw_path = None
+                #if hidraw exist, replace the guid and use the provided mapping
+                if pad.device_path in evdev_hidraw:
+                    hidraw_path = evdev_hidraw[pad.device_path]
+
+                if hidraw_path and hidraw_path in sdl_gamepads:
+                    pad.guid = sdl_gamepads[hidraw_path]['guid']
+                    pad.inputs = sdl_gamepads[hidraw_path]['inputs']
+                #try to get to mapping from the yuzu libsdl (mapping is different than libsdl from ES for some gamepad like xbox one)
+                elif pad.device_path in sdl_gamepads:
+                    pad.inputs = sdl_gamepads[pad.device_path]['inputs']
+                #fallback to inputs from ES, we use original pad.inputs
+
+
+                #port index is by guid
+                if pad.guid not in guid_port:
+                    guid_port[pad.guid] = 0
+                else:
+                    guid_port[pad.guid] = guid_port[pad.guid] + 1
+
+                yuzuConfig.set("Controls", player_nb_str + "_type\\default", "false")
+                if 'p{}_pad'.format(nplayer + 1) in config:
+                    yuzuConfig.set("Controls", player_nb_str + "_type", config["p{}_pad".format(nplayer + 1)])
+                else:
+                    yuzuConfig.set("Controls", player_nb_str + "_type", 0)
+
+                #invert A<->B  X<->Y based on "Nintendo"
+                if pad.real_name and "Nintendo" in pad.real_name:
+                    yuzuButtonsMapping["button_a"] = "b"
+                    yuzuButtonsMapping["button_b"] = "a"
+                    yuzuButtonsMapping["button_x"] = "y"
+                    yuzuButtonsMapping["button_y"] = "x"
+
+                yuzu_inverse_button = config.get('yuzu_inverse_button', 'false').lower() == 'true'
+                if yuzu_inverse_button:
+                    yuzuButtonsMapping["button_a"] = "b"
+                    yuzuButtonsMapping["button_b"] = "a"
+                    yuzuButtonsMapping["button_x"] = "y"
+                    yuzuButtonsMapping["button_y"] = "x"
+
+                print("Manette :", pad.name, file=sys.stderr)
+                print("Guid :", pad.guid, file=sys.stderr)
+                print("Yuzu Inverse Button COnfig : ", yuzu_inverse_button, file=sys.stderr)
+
+
+                for x in yuzuButtonsMapping:
+                    yuzuConfig.set("Controls", player_nb_str + "_" + x, '"{}"'.format(Eden.setButton(emulator, yuzuButtonsMapping[x], pad.guid, pad.inputs, guid_port[pad.guid])))
+                for x in yuzuAxisMapping:
+                    yuzuConfig.set("Controls", player_nb_str + "_" + x, '"{}"'.format(Eden.setAxis(yuzuAxisMapping[x], pad.guid, pad.inputs, guid_port[pad.guid])))
+
+                yuzuConfig.set("Controls", player_nb_str + "_button_screenshot\\default", "false")
+                yuzuConfig.set("Controls", player_nb_str + "_button_screenshot", "[empty]")
+                yuzuConfig.set("Controls", player_nb_str + "_motionleft\\default", "false")
+                yuzuConfig.set("Controls", player_nb_str + "_motionleft", '"guid:{},port:{},motion:0,engine:sdl"'.format(pad.guid,guid_port[pad.guid]))
+                yuzuConfig.set("Controls", player_nb_str + "_motionright\\default", "false")
+                yuzuConfig.set("Controls", player_nb_str + "_motionright", '"guid:{},port:{},motion:0,engine:sdl"'.format(pad.guid,guid_port[pad.guid]))
+                yuzuConfig.set("Controls", player_nb_str + "_connected", "true")
+                yuzuConfig.set("Controls", player_nb_str + "_connected\\default", "false")
+
+                # Vibration
+                if ('yuzu_rumble' in config):
+                    yuzuConfig.set("Controls", player_nb_str + "_vibration_enabled", config["yuzu_rumble"])
+                    yuzuConfig.set("Controls", player_nb_str + "_vibration_enabled\\default", "false")
+                else:
+                    yuzuConfig.set("Controls", player_nb_str + "_vibration_enabled", "true")
+                    yuzuConfig.set("Controls", player_nb_str + "_vibration_enabled\\default", "true")
+
+                nplayer += 1
+
+
+    # telemetry section
+        if not yuzuConfig.has_section("WebService"):
+            yuzuConfig.add_section("WebService")
+        yuzuConfig.set("WebService", "enable_telemetry", "false")
+        yuzuConfig.set("WebService", "enable_telemetry\\default", "false")
+        yuzuConfig.set("WebService", "enable_auto_update_check", "false")
+        yuzuConfig.set("WebService", "enable_auto_update_check\\default", "false")
+
+    # Services section
+        if not yuzuConfig.has_section("Services"):
+            yuzuConfig.add_section("Services")
+        yuzuConfig.set("Services", "bcat_backend", "none")
+        yuzuConfig.set("Services", "bcat_backend\\default", "none")
+        #nextendo
+        yuzuConfig.set("Services", "enable_nextendo", "true")
+        yuzuConfig.set("Services", "enable_nextendo\\default", "false")
+
+    # Network section (nextendo)
+        if not yuzuConfig.has_section("Network"):
+            yuzuConfig.add_section("Network")
+        yuzuConfig.set("Network", "enable_nextendo", "true")
+        yuzuConfig.set("Network", "enable_nextendo\\default", "false")
+
+        ### update the configuration file
+        if not os.path.exists(os.path.dirname(yuzuConfigFile)):
+            os.makedirs(os.path.dirname(yuzuConfigFile))
+
+        with open(yuzuConfigFile, 'w') as configfile:
+            yuzuConfig.write(configfile)
+
+    @staticmethod
+    def setButton(emulator, key, padGuid, padInputs, port):
+         # it would be better to pass the joystick num instead of the guid because 2 joysticks may have the same guid
+         if key in padInputs:
+
+             # if emulator == "citron-emu" and key in ['left', 'right', 'up', 'down']:
+                 # return ("hat:0,pad:0,direction:{},guid:{},port:{},engine:sdl").format(key, padGuid, port)
+
+             input = padInputs[key]
+             
+             print("input :", input, file=sys.stderr)
+
+             if input.type == "button":
+                 return ("button:{},guid:{},port:{},engine:sdl").format(input.id, padGuid, port)
+             elif input.type == "hat":
+                 return ("hat:0,pad:0,direction:{},guid:{},port:{},engine:sdl").format(key, padGuid, port)
+#                return ("hat:{},direction:{},guid:{},port:{},engine:sdl").format(input.id, YuzuMainlineGenerator.hatdirectionvalue(input.value), padGuid, port)
+
+
+             elif input.type == "axis":
+                 return ("threshold:{},axis:{},guid:{},port:{},engine:sdl").format(0.5, input.id, padGuid, port)
+         return ""
+
+    @staticmethod
+    def hatdirectionvalue(value):
+        if int(value) == 1:
+            return "up"
+        if int(value) == 4:
+            return "down"
+        if int(value) == 2:
+            return "right"
+        if int(value) == 8:
+            return "left"
+        return "unknown"
+
+    @staticmethod
+    def setAxis(key, padGuid, padInputs, port):
+         inputx = "0"
+         inputy = "0"
+
+         if key == "joystick1" and "joystick1left" in padInputs:
+             padinputx = padInputs["joystick1left"]
+             if padinputx.id is not None:
+                 inputx = padinputx.id
+         elif key == "joystick2" and "joystick2left" in padInputs:
+             padinputx = padInputs["joystick2left"]
+             if padinputx.id is not None:
+                 inputx = padinputx.id
+
+         if key == "joystick1" and "joystick1up" in padInputs:
+             padinputy = padInputs["joystick1up"]
+             if padinputy.id is not None:
+                 inputy = padinputy.id
+         elif key == "joystick2" and "joystick2up" in padInputs:
+             padinputy = padInputs["joystick2up"]
+             if padinputy.id is not None:
+                 inputy = padinputy.id
+
+         return ("range:1.000000,deadzone:0.100000,invert_y:+,invert_x:+,offset_y:-0.000000,axis_y:{},offset_x:-0.000000,axis_x:{},guid:{},port:{},engine:sdl").format(inputy, inputx, padGuid, port)
+
+    @property
+    def needs_mouse(self) -> bool:
+        return True
