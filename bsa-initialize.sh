@@ -96,6 +96,12 @@ initialize_common() {
 	message "log" "$addon_log" "Setup Switch Config Generators. => /userdata/system/switch/configgen"
 	cp -rfT "$switch_install_configgen_dir" "$switch_configgen_dir" 2>>"$stderr_log"
 
+	# INSTALL SWITCH LAUNCHER PACKAGE (Batocera 44)
+	if [ -d "$switch_install_launch_dir" ]; then
+		message "log" "$addon_log" "Setup Switch Launch Package. => /userdata/system/switch/launch"
+		cp -rfT "$switch_install_launch_dir" "$switch_system_dir/launch" 2>>"$stderr_log"
+	fi
+
 	# CREATE SWITCH BIN DIRECTORY
 	message "log" "$addon_log" "Creating Switch BIN Directory. => /userdata/system/switch/bin"
 	mkdir -p "$switch_bin_dir" 2>>"$stderr_log"
