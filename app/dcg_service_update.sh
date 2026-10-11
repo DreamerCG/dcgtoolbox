@@ -195,6 +195,14 @@ PY
     chmod a+x "$DIR_SWITCH/configgen/generators/ryujinxGenerator.py"
     chmod a+x "$DIR_SWITCH/configgen/generators/ryujinxloadfirmware.sh"
 
+    if ! curl -fsSL \
+        "https://raw.githubusercontent.com/DreamerCG/dcgtoolbox/main/install/gamecontrollerdb.txt" \
+        -o "$DIR_SWITCH/configgen/gamecontrollerdb.txt"; then
+        echo "[$(date)] ERREUR : impossible de mettre à jour gamecontrollerdb.txt"
+        exit 1
+    fi
+    echo "[$(date)] Mise à jour de configgen/gamecontrollerdb.txt"
+
     mkdir -p "$DIR_SWITCH_LOCAL_BIN/xdgfix"
 
     curl -sL "$ULR_BIN/folder-open" -o "$DIR_SWITCH_LOCAL_BIN/xdgfix/xdg-open"
