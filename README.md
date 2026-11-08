@@ -33,6 +33,9 @@ curl -k -sL https://dreamercg.s.gy/switch | bash
 - Emulator AppImage Not Found Locally will Attempt to Get Remotely
 - Ability to Select Individual Emulators to Install
 - Update Emulator AppImage
+- Citron downloads the latest nightly Linux x86_64_v3 AppImage when no local
+  AppImage is available. The remote update option downloads the latest release;
+  otherwise, an existing local AppImage is reused for offline installations.
 - Separate Firmware & Keys for Ryujinx & Yuzu (+Forks)
 - Changed Saves to now reflect NAND structure for easier backup
 - Backup Saves from Menu (working on restore function)
