@@ -319,22 +319,45 @@ install_emulator_eden_nightly() {
 
 
 install_emulator_citron() {
-	message "log" "$addon_log" "<<< [ INSTALL : CITRON Neo-2026.09.10]>>>"
+	local tag_page appimage_path citron_install_url
+	local release_base="https://git.nextendo.network"
+	local local_appimage="$switch_install_emus_dir/$citron_install_file"
 
-	# INSTALL/UNPACK EMULATOR
-	# EMULATOR INSTALL ARCHIVE/APP NOT FOUND LOCALLY THEN ATTEMPT TO DOWNLOAD
-	message "log" "$addon_log" "Installing Citron Neo-2026.09.10 Emulator App "
-	# Get lastest version from database & set the version for download
-    #citron_install_url="https://foclabroc.freeboxos.fr:55973/share/oZ4k4wPXDTu-fy3g/citron-emu(2026.03.12).AppImage"
-    citron_install_url="https://foclabroc.freeboxos.fr:55973/share/4Hd7ueCAGnpabXA5/citron-emu(2026.09.10).AppImage"
+	message "log" "$addon_log" "<<< [ INSTALL : CITRON ]>>>"
+	message "log" "$addon_log" "Installing Citron Emulator App"
 
-	# If missing from local storage then attempt to download latest version
-	download_missing_file "$citron_install_url" "$switch_install_emus_dir/$citron_install_file" "Citron"
-	if [ $wget_exit_code -eq 0 ]; then
-		copy_make_executable "$citron_install_file" "$switch_install_emus_dir" "$citron_emu_dir"
+	if [ ! -f "$local_appimage" ]; then
+		message "both" "$addon_log" "Checking latest Citron nightly-linux release..."
+		if ! tag_page="$(curl -fsL --connect-timeout 5 --max-time 15 \
+			"$release_base/NextendoNetwork/citron-nextendo/releases/tag/nightly-linux")"; then
+			message "both" "$addon_log" "ERROR: Unable to fetch Citron release page"
+			return 1
+		fi
+
+		appimage_path="$(printf '%s\n' "$tag_page" | grep -Eo \
+			'/NextendoNetwork/citron-nextendo/releases/download/nightly-linux/citron_nightly-[0-9a-f]+-linux-x86_64_v3\.AppImage' | head -n 1)"
+		if [ -z "$appimage_path" ]; then
+			message "both" "$addon_log" "ERROR: No Citron Linux x86_64_v3 AppImage found in release assets"
+			return 1
+		fi
+
+		citron_install_url="$release_base$appimage_path"
+		message "both" "$addon_log" "Citron AppImage: ${appimage_path##*/}"
+		message "both" "$addon_log" "Citron URL: $citron_install_url"
+		download_missing_file "$citron_install_url" "$local_appimage" "Citron"
+		if [ "$wget_exit_code" -ne 0 ]; then
+			message "both" "$addon_log" "ERROR: Unable to download Citron AppImage"
+			return 1
+		fi
+	else
+		message "log" "$addon_log" "Using local Citron AppImage: $local_appimage"
+	fi
+
+	if ! copy_make_executable "$citron_install_file" "$switch_install_emus_dir" "$citron_emu_dir"; then
+		message "both" "$addon_log" "ERROR: Unable to install Citron AppImage"
+		return 1
 	fi
 }
-
 
 
 
